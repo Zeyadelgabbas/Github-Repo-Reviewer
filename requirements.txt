@@ -6,3 +6,4 @@ tiktoken
 python-dotenv
 gitpython
 radon
+requests
