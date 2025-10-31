@@ -71,7 +71,4 @@ class Config:
         return dic 
 
 
-
-
-        
-        
+config = Config()     
