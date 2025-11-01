@@ -6,7 +6,7 @@ agent:
 
 # Review Settings
 review:
-  max_files: 20
+  max_files: 30
   supported_extensions:
     - .py
     - .js
