@@ -2,6 +2,7 @@ from langgraph.graph import StateGraph, END
 from typing import Dict, Any
 from .state import AgentState, WorkflowStep, create_initial_state
 from ..utils import get_logger
+from .repo_analyzer import RepositoryAnalyzer
 
 logging = get_logger(__name__)
 
@@ -43,6 +44,10 @@ class CodeReviewOrchestrator:
     # Placeholder node functions (we'll implement these in later phases)
     def _analyze_repo_node(self, state: AgentState) -> AgentState:
         """Node for repository analysis."""
+
+        analyzer = RepositoryAnalyzer()
+
+        state = analyzer.analyze(state=state)
         logging.info("Repository Analysis , Analyzing repository structure...")
         state["current_step"] = WorkflowStep.REPO_ANALYSIS.value
         state["messages"].append("Repository analysis completed (placeholder)")
