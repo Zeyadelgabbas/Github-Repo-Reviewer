@@ -3,6 +3,7 @@ from typing import Dict, Any
 from .state import AgentState, WorkflowStep, create_initial_state
 from ..utils import get_logger
 from .repo_analyzer import RepositoryAnalyzer
+from .code_reviewer import CodeReviewer
 
 logging = get_logger(__name__)
 
@@ -55,9 +56,15 @@ class CodeReviewOrchestrator:
     
     def _review_code_node(self, state: AgentState) -> AgentState:
         """Node for code review."""
+
+        reviewer = CodeReviewer()
         logging.info("Code Review,  Reviewing code...")
+
+        state = reviewer.review(state)
+
         state["current_step"] = WorkflowStep.CODE_REVIEW.value
         state["messages"].append("Code review completed (placeholder)")
+        
         return state
     
     def _generate_docs_node(self, state: AgentState) -> AgentState:
