@@ -7,3 +7,5 @@ python-dotenv
 gitpython
 radon
 requests
+openai 
+streamlit

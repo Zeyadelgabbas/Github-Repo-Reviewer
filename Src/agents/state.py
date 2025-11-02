@@ -12,9 +12,8 @@ class WorkflowStep(Enum):
     ERROR = "error"
 
 class AgentState(TypedDict):
-    """
-    State schema for the code review agent workflow.
-    """
+    """State schema for the code review agent workflow."""
+    
     # Input
     repo_url: str
     
@@ -24,12 +23,18 @@ class AgentState(TypedDict):
     file_structure: Optional[Dict[str, Any]]
     files_to_review: List[str]
     
-    # Review Results
+    # Code Review Results (NEW!)
+    understanding: Optional[Dict[str, Any]]
+    code_review: Optional[Dict[str, Any]]
+    enhancements: Optional[List[Dict[str, Any]]]
+    documentation: Optional[Dict[str, Any]]
+    summary: Optional[Dict[str, Any]]
+    
+    # Review Summary
     review_results: List[Dict[str, Any]]
     review_summary: Optional[str]
     
     # Documentation
-    documentation: Dict[str, Any]
     readme_content: Optional[str]
     
     # PR Info
@@ -57,9 +62,17 @@ def create_initial_state(repo_url: str) -> AgentState:
         repo_name=None,
         file_structure=None,
         files_to_review=[],
+
+        understanding=None,
+        code_review=None,
+        enhancements=None,
+        documentation=None,
+        summary=None,
+        total_issues_found=0,
+
+
         review_results=[],
         review_summary=None,
-        documentation={},
         readme_content=None,
         pr_created=False,
         pr_url=None,
@@ -67,7 +80,6 @@ def create_initial_state(repo_url: str) -> AgentState:
         errors=[],
         messages=[],
         total_files_analyzed=0,
-        total_issues_found=0,
         start_time=datetime.now().isoformat(),
         end_time=None
     )

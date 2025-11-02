@@ -49,14 +49,6 @@ class CodeReviewer:
             )
             logging.info("user prompt formatted")
 
-            price = self.llm.estimate_token_cost(text=user_prompt)['total_cost_usd']
-            logging.info(f"Estimated price : {price}$")
-
-            pause = input(f"Estimated price is {price} do you wish to continue (y/n)")
-
-            if not str(pause).lower() == 'y':
-                raise
-        
             response_json = self.llm.call_gpt(
                 user_prompt=user_prompt,
                 system_prompt=system_prompt,
@@ -173,5 +165,21 @@ class CodeReviewer:
         
         return state
         
+    def estimate_cost(self,state : AgentState):
+            repo_name = state['repo_name']
+            file_structure = state['file_structure']
+            language_stats = self.filescanner._get_language_stats(files = state['files_to_review'])
+            repo_content = self._concatenate_files(state=state)
+            logging.info("repo content created for for user prompt")
 
+            system_prompt = get_system_prompt()
+            user_prompt = get_comprehensive_review_prompt(
+                repo_name=repo_name,
+                repo_content=repo_content,
+                file_structure=file_structure,
+                language_stats=language_stats
+            )
+            total_cost = self.llm.estimate_token_cost(text=user_prompt)['total_cost']
+
+            return total_cost
         

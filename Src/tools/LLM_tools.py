@@ -29,8 +29,8 @@ class LLMTools:
             user_prompt: str,
             system_prompt: str,
             response_format: str = "text",
-            temperature =  Optional[float] = None ,
-            max_tokens  = Optional[int] = None) -> str:
+            temperature :  Optional[float] = None ,
+            max_tokens  : Optional[int] = None) -> str:
     
 
         """ 
@@ -68,6 +68,7 @@ class LLMTools:
 
             if response_format == 'json':
                 self._validate_json(response_text)
+                
 
             return response_text
 
