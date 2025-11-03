@@ -1,0 +1,2513 @@
+ 
+File : app.py 
+
+content :
+
+import streamlit as st
+import os
+from datetime import datetime
+from Src.agents import CodeReviewOrchestrator, create_initial_state
+from Src.agents.code_reviewer import CodeReviewer
+from Src.agents.repo_analyzer import RepositoryAnalyzer
+from Src.utils import ReportFormatter, get_logger
+from Src.tools import GitHubTools
+
+# Configure page
+st.set_page_config(
+    page_title="AI Code Reviewer",
+    page_icon="🤖",
+    layout="wide"
+)
+
+# Initialize logger
+logging = get_logger(__name__)
+
+# Custom CSS (same as before)
+st.markdown("""
+<style>
+    .stButton>button {
+        width: 100%;
+        background-color: #FF4B4B;
+        color: white;
+        border-radius: 5px;
+        height: 3em;
+        font-weight: bold;
+    }
+    .cost-box {
+        padding: 1.5rem;
+        border-radius: 0.5rem;
+        background-color: #FFF3CD;
+        border: 2px solid #FFC107;
+        color: #856404;
+        font-size: 1.1em;
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+def initialize_session_state():
+    """Initialize session state variables."""
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "report" not in st.session_state:
+        st.session_state.report = None
+    if "local_path" not in st.session_state:
+        st.session_state.local_path = None
+    if "analyzing" not in st.session_state:
+        st.session_state.analyzing = False
+    if "cost_estimated" not in st.session_state:
+        st.session_state.cost_estimated = False
+    if "cost_info" not in st.session_state:
+        st.session_state.cost_info = None
+    if "pending_state" not in st.session_state:
+        st.session_state.pending_state = None
+
+def add_message(role: str, content: str):
+    """Add message to chat history."""
+    st.session_state.messages.append({"role": role, "content": content})
+
+def estimate_analysis_cost(repo_url: str):
+    """
+    Estimate cost of analysis without running it.
+    
+    Args:
+        repo_url: GitHub repository URL
+    """
+    try:
+        add_message("user", f"Analyze: {repo_url}")
+        add_message("assistant", "🔄 Preparing cost estimate...")
+        
+        # Step 1: Analyze repository
+        with st.spinner("📂 Cloning and analyzing repository structure..."):
+            analyzer = RepositoryAnalyzer()
+            initial_state = create_initial_state(repo_url)
+            state = analyzer.analyze(initial_state)
+        
+        if state["errors"]:
+            error_msg = "\n".join(state["errors"])
+            add_message("assistant", f"❌ Failed to analyze repository:\n{error_msg}")
+            return
+        
+        st.session_state.local_path = state.get("local_path")
+        
+        # Step 2: Estimate cost
+        with st.spinner("💰 Calculating cost estimate..."):
+            reviewer = CodeReviewer()
+            cost_info = reviewer.estimate_cost(state)
+        
+        if not cost_info:
+            add_message("assistant", f"❌ Failed to estimate cost: {cost_info['error']}")
+            return
+        
+        # Store for later use
+        st.session_state.cost_info = cost_info
+        st.session_state.pending_state = state
+        st.session_state.cost_estimated = True
+        
+        # Show cost estimate
+        cost_msg = f"""💰 **Cost Estimate**
+
+**Repository:** {state.get('repo_name', 'Unknown')}
+**Files to Analyze:** {len(state['files_to_review'])}
+**Estimated Cost:** ${cost_info:.4f} USD
+
+Click **Confirm & Analyze** below to proceed with the analysis.
+"""
+        add_message("assistant", cost_msg)
+        
+    except Exception as e:
+        logging.error(f"Cost estimation failed: {str(e)}")
+        add_message("assistant", f"❌ Error: {str(e)}")
+
+def run_analysis_with_confirmation():
+    """Run analysis after user confirms cost."""
+    try:
+        state = st.session_state.pending_state
+        cost_info = st.session_state.cost_info
+        
+        add_message("assistant", f"✅ Proceeding with analysis (estimated cost: ${cost_info:.4f})")
+        
+        # Run code review (skip cost check since we already confirmed)
+        with st.spinner("🔍 Analyzing code... This may take 1-2 minutes."):
+            reviewer = CodeReviewer()
+            final_state = reviewer.review(state)
+        
+        # Check for errors
+        if final_state["errors"]:
+            error_msg = "\n".join(final_state["errors"])
+            add_message("assistant", f"❌ Analysis completed with errors:\n{error_msg}")
+            return
+        
+        # Generate report
+        with st.spinner("📝 Generating report..."):
+            formatter = ReportFormatter()
+            report = formatter.generate_report(final_state)
+            st.session_state.report = report
+        
+        # Success message
+        summary = final_state.get("summary", {})
+        issues_found = final_state.get("total_issues_found", 0)
+        
+        success_msg = f"""✅ **Analysis Complete!**
+
+**Repository:** {final_state.get('repo_name', 'Unknown')}
+**Files Analyzed:** {final_state.get('total_files_analyzed', 0)}
+**Issues Found:** {issues_found}
+**Overall Quality:** {summary.get('overall_quality', 'N/A')}/10
+**Production Ready:** {'✅ Yes' if summary.get('production_ready') else '❌ No'}
+"""
+        add_message("assistant", success_msg)
+        add_message("assistant", "📄 **Full Report:**\n\n" + report)
+        
+        # Reset cost estimation state
+        st.session_state.cost_estimated = False
+        st.session_state.cost_info = None
+        st.session_state.pending_state = None
+        
+    except Exception as e:
+        logging.error(f"Analysis failed: {str(e)}")
+        add_message("assistant", f"❌ Error: {str(e)}")
+
+def cleanup_repository():
+    """Clean up cloned repository."""
+    if st.session_state.local_path:
+        try:
+            github_tools = GitHubTools()
+            success = github_tools.cleanup_repository(st.session_state.local_path)
+            
+            if success:
+                st.success("✅ Cloned repository cleaned up successfully!")
+                st.session_state.local_path = None
+            else:
+                st.warning("⚠️ Repository might not exist or already cleaned up.")
+                
+        except Exception as e:
+            st.error(f"❌ Cleanup failed: {str(e)}")
+    else:
+        st.info("ℹ️ No repository to clean up.")
+
+def main():
+    """Main application."""
+    
+    # Initialize session state
+    initialize_session_state()
+    
+    # Header
+    st.title("🤖 AI Code Review Agent")
+    st.markdown("Powered by LangChain, LangGraph & OpenAI GPT-4")
+    
+    # Sidebar (same as before)
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            st.success("✅ OpenAI API Key loaded")
+        else:
+            st.error("❌ OpenAI API Key not found!")
+            st.info("Add OPENAI_API_KEY to your .env file")
+        
+        st.markdown("---")
+        
+        st.header("📖 How to Use")
+        st.markdown("""
+1. Enter a GitHub repository URL
+2. Click **Estimate Cost**
+3. Review the cost estimate
+4. Click **Confirm & Analyze**
+5. Wait for analysis (1-2 minutes)
+6. View the comprehensive report
+7. Download the report
+8. Clean up when done
+        """)
+        
+        st.markdown("---")
+        
+        st.header("🧹 Cleanup")
+        if st.button("🗑️ Delete Cloned Repository", key="cleanup"):
+            cleanup_repository()
+        
+        if st.session_state.local_path:
+            st.info(f"📁 Current clone:\n`{st.session_state.local_path}`")
+        else:
+            st.info("ℹ️ No active repository clone")
+        
+        st.markdown("---")
+        
+        st.header("ℹ️ About")
+        st.markdown("""
+This tool uses AI to analyze code repositories and provide:
+- Project understanding
+- Security analysis
+- Bug detection
+- Performance insights
+- Enhancement suggestions
+        """)
+    
+    # Main content area
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        repo_url = st.text_input(
+            "GitHub Repository URL",
+            placeholder="https://github.com/username/repository",
+            help="Enter a public GitHub repository URL",
+            disabled=st.session_state.cost_estimated  # Disable if waiting for confirmation
+        )
+    
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Show appropriate button based on state
+        if not st.session_state.cost_estimated:
+            estimate_button = st.button(
+                "💰 Estimate Cost",
+                disabled=st.session_state.analyzing
+            )
+        else:
+            estimate_button = False
+    
+    # Handle estimate button
+    if estimate_button and repo_url:
+        if not repo_url.startswith("https://github.com/"):
+            st.error("❌ Invalid URL. Must be a GitHub repository URL.")
+        else:
+            st.session_state.analyzing = True
+            st.session_state.messages = []
+            st.session_state.report = None
+            
+            estimate_analysis_cost(repo_url)
+            
+            st.session_state.analyzing = False
+            st.rerun()
+    
+    # Display chat messages
+    st.markdown("---")
+    st.header("💬 Analysis Chat")
+    
+    if st.session_state.messages:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+    else:
+        st.info("👆 Enter a GitHub repository URL above to start")
+    
+    # Show confirmation button if cost is estimated
+    if st.session_state.cost_estimated:
+        st.markdown("---")
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col2:
+            if st.button("✅ Confirm & Analyze", use_container_width=True, type="primary"):
+                st.session_state.analyzing = True
+                run_analysis_with_confirmation()
+                st.session_state.analyzing = False
+                st.rerun()
+            
+            if st.button("❌ Cancel", use_container_width=True):
+                st.session_state.cost_estimated = False
+                st.session_state.cost_info = None
+                st.session_state.pending_state = None
+                add_message("assistant", "❌ Analysis cancelled by user")
+                st.rerun()
+    
+    # Download button
+    if st.session_state.report:
+        st.markdown("---")
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col2:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"code_review_report_{timestamp}.md"
+            
+            st.download_button(
+                label="📥 Download Report as Markdown",
+                data=st.session_state.report,
+                file_name=filename,
+                mime="text/markdown",
+                use_container_width=True
+            )
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+File : Src\main.py 
+
+content :
+
+import sys
+from Src.agents import CodeReviewOrchestrator
+from Src.utils import get_logger, config
+
+# Create logger for main module
+logging = get_logger(__name__)
+
+def print_header():
+    """Print application header to console (not logged)."""
+    print("\n" + "=" * 70)
+    print("🤖 CODE REVIEW & DOCUMENTATION AGENT")
+    print("Powered by LangChain, LangGraph & OpenAI")
+    print("=" * 70 + "\n")
+
+def print_usage():
+    """Print usage instructions."""
+    print("Usage:")
+    print("  python -m src.main <github_repo_url>")
+    print("\nExample:")
+    print("  python -m src.main https://github.com/username/repo")
+    print()
+
+def validate_repo_url(url: str) -> bool:
+    """Validate GitHub repository URL."""
+    if not url.startswith("https://github.com/"):
+        logging.error(f"Invalid GitHub URL provided: {url}")
+        print("❌ Error: Invalid GitHub URL. Must start with https://github.com/")
+        return False
+    return True
+
+def print_results(final_state: dict):
+    """Print final results to console."""
+    print("\n" + "=" * 70)
+    print("✓ WORKFLOW COMPLETED SUCCESSFULLY!")
+    print("=" * 70)
+    
+    print("\n📋 Workflow Messages:")
+    for i, msg in enumerate(final_state["messages"], 1):
+        print(f"  {i}. {msg}")
+    
+    print(f"\n📊 Final Status: {final_state['current_step']}")
+    print(f"📁 Files Analyzed: {final_state['total_files_analyzed']}")
+    print(f"⚠️  Issues Found: {final_state['total_issues_found']}")
+    print(f"❌ Errors: {len(final_state['errors'])}")
+    
+    if final_state['errors']:
+        print("\n🔴 Errors encountered:")
+        for i, error in enumerate(final_state['errors'], 1):
+            print(f"  {i}. {error}")
+    
+    print(f"\n💾 Logs saved to: logs/")
+    print("=" * 70 + "\n")
+
+def main():
+    """Main function."""
+    # Print header (UI only, not logged)
+    print_header()
+    
+    # Log application start
+    logging.info("=" * 70)
+    logging.info("Application started")
+    logging.info("=" * 70)
+    
+    # Check if repo URL is provided
+    if len(sys.argv) < 2:
+        logging.error("No repository URL provided in arguments")
+        print("❌ Error: Please provide a GitHub repository URL\n")
+        print_usage()
+        sys.exit(1)
+    
+    repo_url = sys.argv[1]
+    logging.info(f"Repository URL argument: {repo_url}")
+    
+    # Validate URL
+    if not validate_repo_url(repo_url):
+        sys.exit(1)
+    
+    # Print configuration
+    print(f"📦 Repository: {repo_url}")
+    print(f"🤖 Model: {config.model_name}")
+    print(f"🌡️  Temperature: {config.temperature}")
+    print(f"🔢 Max Tokens: {config.max_tokens}")
+    print()
+    
+    # Log configuration
+    logging.info(f"Configuration - Model: {config.model_name}")
+    logging.info(f"Configuration - Temperature: {config.temperature}")
+    logging.info(f"Configuration - Max Tokens: {config.max_tokens}")
+    
+    try:
+        print("🚀 Starting workflow...\n")
+        logging.info("Creating orchestrator instance")
+        
+        # Create orchestrator
+        orchestrator = CodeReviewOrchestrator()
+        
+        # Run workflow
+        logging.info("Running workflow")
+        final_state = orchestrator.run(repo_url)
+        
+        # Display results
+        print_results(final_state)
+        
+        logging.info("Application completed successfully")
+        logging.info("=" * 70)
+        
+    except KeyboardInterrupt:
+        logging.warning("Workflow interrupted by user (Ctrl+C)")
+        print("\n⚠️  Workflow interrupted by user")
+        sys.exit(1)
+        
+    except Exception as e:
+        logging.error(f"Application failed with error: {str(e)}")
+        logging.exception("Detailed error traceback:")
+        print(f"\n❌ Error: An error occurred - {str(e)}")
+        print(f"💾 Check logs for details: logs/")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+
+==============================
+File : Src\__init__.py 
+
+content :
+
+
+
+==============================
+File : Src\agents\code_reviewer.py 
+
+content :
+
+import json 
+import os 
+from typing import Dict , List , Any , Optional
+
+from ..tools import FileScanner , LLMTools
+from ..utils import get_logger 
+from .state import AgentState
+from ..prompts import get_comprehensive_review_prompt , get_system_prompt
+
+logging = get_logger(__name__)
+
+class CodeReviewer:
+
+    """" 
+    Code reviewer agent that reads the entire repository 
+
+    1- read all code files
+    2- concatenate all files with structure
+    3- invoke LLM with entire structured repo cotent
+    4- updates states with ( understanding , review , suggestions )
+    """
+
+
+    def __init__(self):
+        
+        self.llm = LLMTools()
+        self.filescanner = FileScanner()
+
+
+    def review(self,state: AgentState) -> AgentState:
+
+        """
+        Main review function that analyze the repo 
+        """
+
+        try:
+            repo_name = state['repo_name']
+            file_structure = state['file_structure']
+            language_stats = self.filescanner._get_language_stats(files = state['files_to_review'])
+            repo_content = self._concatenate_files(state=state)
+            logging.info("repo content created for for user prompt")
+
+            system_prompt = get_system_prompt()
+            user_prompt = get_comprehensive_review_prompt(
+                repo_name=repo_name,
+                repo_content=repo_content,
+                file_structure=file_structure,
+                language_stats=language_stats
+            )
+            logging.info("user prompt formatted")
+
+            response_json = self.llm.call_gpt(
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                response_format='json'
+            )
+            logging.info("json response generated from LLM")
+
+            structured_response = self._parse_json_response(response_json)
+            logging.info("parsed analysis results succesfully")
+
+            state_update = self._update_state(state= state , structured_response = structured_response)
+            logging.info("code review agent updated states")
+
+            return state_update
+        
+        except json.JSONDecodeError as e: 
+            error_msg = f"failed to parse llm response as json : {str(e)}"
+            logging.error(error_msg)
+            raise error_msg
+        
+        except Exception as e:
+            error_msg = f"Error reviewing {repo_name} : {e}"
+            logging.error(error_msg)
+            raise e 
+
+    def _concatenate_files(self,state: AgentState) -> str:
+
+        """ reads and concatenates all files into one string """
+
+        try:
+
+            all_files = state['files_to_review']
+            repo_path = state['local_path']
+
+            content = " "
+
+            for file_path in all_files:
+                content += f"\nFile : {file_path} \n\ncontent :\n\n{self.filescanner.read_file_content(repo_path,file_path)}\n\n"
+                content += "==="*10
+
+            logging.info(f"Concatenated {len(all_files)} files successfully")
+            return content
+
+        except Exception as e:
+            error_msg = f"Error concatenating files : {e}"
+            logging.error(error_msg)
+            raise error_msg
+
+    def _parse_json_response(self, response: str) -> Dict[str,Any]:
+
+        """ Parses LLM json response into structured data"""
+
+        try: 
+
+            logging.info("Parsing GPT response...")
+            response_clean = response.strip()
+            if response_clean.startswith("```json"):
+                response_clean = response_clean[7:]  # Remove ```json
+            if response_clean.startswith("```"):
+                response_clean = response_clean[3:]  # Remove ```
+            if response_clean.endswith("```"):
+                response_clean = response_clean[:-3]  # Remove ```
+        
+            response_clean = response_clean.strip()
+
+            analysis = json.loads(response_clean)
+            logging.info("JSON parsed successfully")
+
+            return analysis
+
+        except json.JSONDecodeError as e:
+            error_msg = f"error parsing json response : {str(e)}"
+            logging.error(error_msg)
+            raise error_msg
+        
+        except Exception as e: 
+            logging.error(e)
+            raise e
+
+
+    def _update_state(self,state: AgentState , structured_response : Dict[str,Any]) -> AgentState:
+
+        analysis = structured_response
+        state["understanding"] = analysis.get("understanding", {})
+
+        # Add code review findings
+        state["code_review"] = analysis.get("code_review", {})
+        
+        # Add enhancement suggestions
+        state["enhancements"] = analysis.get("enhancements", [])
+        
+        # Add documentation assessment
+        state["documentation"] = analysis.get("documentation", {})
+        
+        # Add summary
+        state["summary"] = analysis.get("summary", {})
+        
+        # Count issues
+        code_review = state["code_review"]
+        total_issues = (
+            len(code_review.get("security", [])) +
+            len(code_review.get("bugs", [])) +
+            len(code_review.get("performance", [])) +
+            len(code_review.get("code_quality", []))
+        )
+        
+        state["total_issues_found"] = total_issues
+        
+        # Add success message
+        message = f"✅ Analysis complete: Found {total_issues} issues across {len(state['files_to_review'])} files"
+        state["messages"].append(message)
+        
+        logging.info(f"State updated: {total_issues} total issues found")
+        
+        return state
+        
+    def estimate_cost(self,state : AgentState):
+            repo_name = state['repo_name']
+            file_structure = state['file_structure']
+            language_stats = self.filescanner._get_language_stats(files = state['files_to_review'])
+            repo_content = self._concatenate_files(state=state)
+            logging.info("repo content created for for user prompt")
+
+            system_prompt = get_system_prompt()
+            user_prompt = get_comprehensive_review_prompt(
+                repo_name=repo_name,
+                repo_content=repo_content,
+                file_structure=file_structure,
+                language_stats=language_stats
+            )
+            total_cost = self.llm.estimate_token_cost(text=user_prompt)['total_cost']
+
+            return total_cost
+        
+
+
+==============================
+File : Src\agents\orchestrator.py 
+
+content :
+
+from langgraph.graph import StateGraph, END
+from typing import Dict, Any
+from .state import AgentState, WorkflowStep, create_initial_state
+from ..utils import get_logger
+from .repo_analyzer import RepositoryAnalyzer
+from .code_reviewer import CodeReviewer
+
+logging = get_logger(__name__)
+
+class CodeReviewOrchestrator:
+    """
+    Main orchestrator for the code review workflow using LangGraph.
+    Coordinates all agents and manages the workflow state.
+    """
+    
+    def __init__(self):
+        self.graph = self._build_graph()
+    
+    def _build_graph(self) -> StateGraph:
+        """Build the LangGraph workflow."""
+        
+        # Create workflow graph
+        workflow = StateGraph(AgentState)
+        
+        # Add nodes (we'll implement these in later phases)
+        workflow.add_node("analyze_repo", self._analyze_repo_node)
+        workflow.add_node("review_code", self._review_code_node)
+        workflow.add_node("generate_docs", self._generate_docs_node)
+        workflow.add_node("create_pr", self._create_pr_node)
+        workflow.add_node("complete", self._complete_node)
+        
+        # Set entry point
+        workflow.set_entry_point("analyze_repo")
+        
+        # Add edges (workflow transitions)
+        workflow.add_edge("analyze_repo", "review_code")
+        workflow.add_edge("review_code", "generate_docs")
+        workflow.add_edge("generate_docs", "create_pr")
+        workflow.add_edge("create_pr", "complete")
+        workflow.add_edge("complete", END)
+        
+        # Compile graph
+        return workflow.compile()
+    
+    # Placeholder node functions (we'll implement these in later phases)
+    def _analyze_repo_node(self, state: AgentState) -> AgentState:
+        """Node for repository analysis."""
+
+        analyzer = RepositoryAnalyzer()
+
+        state = analyzer.analyze(state=state)
+        logging.info("Repository Analysis , Analyzing repository structure...")
+        state["current_step"] = WorkflowStep.REPO_ANALYSIS.value
+        state["messages"].append("Repository analysis completed (placeholder)")
+        return state
+    
+    def _review_code_node(self, state: AgentState) -> AgentState:
+        """Node for code review."""
+
+        reviewer = CodeReviewer()
+        logging.info("Code Review,  Reviewing code...")
+
+        state = reviewer.review(state)
+
+        state["current_step"] = WorkflowStep.CODE_REVIEW.value
+        state["messages"].append("Code review completed (placeholder)")
+        
+        return state
+    
+    def _generate_docs_node(self, state: AgentState) -> AgentState:
+        """Node for documentation generation."""
+        logging.info("Documentation , Generating documentation...")
+        state["current_step"] = WorkflowStep.DOC_GENERATION.value
+        state["messages"].append("Documentation generated (placeholder)")
+        return state
+    
+    def _create_pr_node(self, state: AgentState) -> AgentState:
+        """Node for PR creation."""
+        logging.info("PR Creation , Creating pull request...")
+        state["current_step"] = WorkflowStep.PR_CREATION.value
+        state["messages"].append("PR creation skipped (placeholder)")
+        return state
+    
+    def _complete_node(self, state: AgentState) -> AgentState:
+        """Final node - mark workflow as complete."""
+        from datetime import datetime
+        
+        logging.info("Complete, Workflow completed successfully!")
+        state["current_step"] = WorkflowStep.COMPLETE.value
+        state["end_time"] = datetime.now().isoformat()
+        
+        # Print summary
+        logging.info(f"Total files analyzed: {state['total_files_analyzed']}")
+        logging.info(f"Total issues found: {state['total_issues_found']}")
+        
+        return state
+    
+    def run(self, repo_url: str) -> AgentState:
+        """
+        Run the complete code review workflow.
+        
+        Args:
+            repo_url: GitHub repository URL
+            
+        Returns:
+            Final state after workflow completion
+        """
+        logging.info(f"Starting code review workflow for: {repo_url}")
+        
+        try:
+            # Create initial state
+            initial_state = create_initial_state(repo_url)
+            
+            # Execute workflow
+            final_state = self.graph.invoke(initial_state)
+            
+            logging.info("Workflow completed successfully!")
+            return final_state
+            
+        except Exception as e:
+            logging.error(f"Workflow failed: {str(e)}")
+            raise e
+
+==============================
+File : Src\agents\repo_analyzer.py 
+
+content :
+
+from typing import Dict , List , Any 
+
+from ..utils import get_logger 
+from ..tools import FileScanner , GitHubTools
+from .state import AgentState 
+
+logging = get_logger(__name__)
+
+class RepositoryAnalyzer:
+    """
+    Agent handles github repository analyses
+
+    1- clone repository
+    2- scan for code files
+    3- update workflow state with the results
+    
+    """
+
+
+    def __init__(self):
+
+        self.filescanner = FileScanner()
+        self.githubtool = GitHubTools()
+
+
+    def analyze(self, state : AgentState) -> AgentState: 
+
+
+        repo_url = state['repo_url']
+        try:
+
+            clone_result = self._clone_repository(repo_url=repo_url)
+
+            if clone_result['error']:
+                return self._handle_clone_failure(state = state , error = clone_result['error'])
+            
+            local_path = clone_result['local_path']
+            state['local_path'] = local_path
+            state['repo_name'] = clone_result['repo_name']
+
+            logging.info(f"repo cloned to {local_path}")
+            
+            scan_results = self.filescanner.scan_repository(repo_path=local_path)
+
+            state['files_to_review'] = scan_results['files_to_review']
+            state['file_structure'] = scan_results['file_structure']
+            state['total_files_analyzed'] = scan_results['total_files']
+
+            message = f"found {scan_results['total_files']} files "
+            state['messages'].append(message)
+
+            return state
+
+            
+        except Exception as e: 
+            error_msg = f"Error analyzing repository {e}"
+            logging.error(error_msg)
+            state['errors'].append(error_msg)
+            state['messages'].append("Repository analysis failed")
+
+            return state
+        
+    
+    def _handle_clone_failure(self, state: AgentState, error: str) -> AgentState:
+        """
+        Handle clone failure by updating state with error information.
+        
+        Args:
+            state: Current workflow state
+            error: Error message from clone operation
+            
+        Returns:
+            Updated state with error information
+        """
+        logging.error(f"Handling clone failure: {error}")
+        
+        # Add error to state
+        state["errors"].append(f"Clone failed: {error}")
+        state["messages"].append("❌ Failed to clone repository")
+        
+        # Set empty values for fields that depend on clone
+        state["local_path"] = None
+        state["files_to_review"] = []
+        state["file_structure"] = {}
+        state["total_files_analyzed"] = 0
+        
+        return state        
+    
+
+    def _clone_repository(self, repo_url: str) -> Dict[str, Any]:
+        """
+        Clone repository using GitHubTools.
+        
+        Args:
+            repo_url: GitHub repository URL
+            
+        Returns:
+            Dictionary with clone results from GitHubTools
+        """
+        logging.info(f"Cloning repository: {repo_url}")
+        
+        # Call GitHubTools to clone
+        result = self.githubtool.clone_repository(repo_url)
+        
+        if result["success"]:
+            logging.info("Clone successful")
+        else:
+            logging.error(f"Clone failed: {result['error']}")
+        
+        return result
+    def cleanup(self, local_path: str) -> bool:
+        """
+        Clean up cloned repository (optional - for manual cleanup).
+        
+        Args:
+            local_path: Path to cloned repository
+            
+        Returns:
+            True if cleanup successful
+        """
+        if local_path:
+            logging.info(f"Cleaning up repository at: {local_path}")
+            return self.githubtool.cleanup_repository(local_path)
+        return False
+
+==============================
+File : Src\agents\state.py 
+
+content :
+
+from typing import TypedDict, List, Dict, Any, Optional
+from enum import Enum
+
+class WorkflowStep(Enum):
+    """Enum for workflow steps."""
+    INIT = "init"
+    REPO_ANALYSIS = "repo_analysis"
+    CODE_REVIEW = "code_review"
+    DOC_GENERATION = "doc_generation"
+    PR_CREATION = "pr_creation"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+class AgentState(TypedDict):
+    """State schema for the code review agent workflow."""
+    
+    # Input
+    repo_url: str
+    
+    # Repository Info
+    local_path: Optional[str]
+    repo_name: Optional[str]
+    file_structure: Optional[Dict[str, Any]]
+    files_to_review: List[str]
+    
+    # Code Review Results (NEW!)
+    understanding: Optional[Dict[str, Any]]
+    code_review: Optional[Dict[str, Any]]
+    enhancements: Optional[List[Dict[str, Any]]]
+    documentation: Optional[Dict[str, Any]]
+    summary: Optional[Dict[str, Any]]
+    
+    # Review Summary
+    review_results: List[Dict[str, Any]]
+    review_summary: Optional[str]
+    
+    # Documentation
+    readme_content: Optional[str]
+    
+    # PR Info
+    pr_created: bool
+    pr_url: Optional[str]
+    
+    # Workflow Control
+    current_step: str
+    errors: List[str]
+    messages: List[str]
+    
+    # Metadata
+    total_files_analyzed: int
+    total_issues_found: int
+    start_time: Optional[str]
+    end_time: Optional[str]
+
+def create_initial_state(repo_url: str) -> AgentState:
+    """Create initial state for the workflow."""
+    from datetime import datetime
+    
+    return AgentState(
+        repo_url=repo_url,
+        local_path=None,
+        repo_name=None,
+        file_structure=None,
+        files_to_review=[],
+
+        understanding=None,
+        code_review=None,
+        enhancements=None,
+        documentation=None,
+        summary=None,
+        total_issues_found=0,
+
+
+        review_results=[],
+        review_summary=None,
+        readme_content=None,
+        pr_created=False,
+        pr_url=None,
+        current_step=WorkflowStep.INIT.value,
+        errors=[],
+        messages=[],
+        total_files_analyzed=0,
+        start_time=datetime.now().isoformat(),
+        end_time=None
+    )
+
+==============================
+File : Src\agents\__init__.py 
+
+content :
+
+from .orchestrator import CodeReviewOrchestrator
+from .state import AgentState, WorkflowStep, create_initial_state
+
+__all__ = [
+    'CodeReviewOrchestrator',
+    'AgentState',
+    'WorkflowStep',
+    'create_initial_state'
+]
+
+==============================
+File : Src\prompts\review_prompts.py 
+
+content :
+
+from typing import Dict, List
+
+def get_system_prompt() -> str:
+    """
+    System prompt defining the AI's role and expertise.
+
+    Returns:
+        System prompt string
+    """
+    return """You are an expert software engineer and code reviewer with deep expertise in:
+
+- Software architecture and design patterns
+- Security best practices (OWASP Top 10, secure coding)
+- Performance optimization and algorithmic efficiency
+- Code quality and maintainability
+- Multiple programming languages and frameworks
+- Documentation and API design
+- DevOps and deployment practices
+
+Your goal is to provide comprehensive, actionable, and constructive feedback.
+Be thorough but concise. Focus on real issues, not nitpicking."""
+
+
+def get_comprehensive_review_prompt(
+    repo_name: str,
+    repo_content: str,
+    file_structure: Dict,
+    language_stats: Dict[str, int]
+) -> str:
+    """
+    Create comprehensive prompt for full repository analysis.
+    
+    This single prompt asks GPT for EVERYTHING we need:
+    - Project understanding
+    - Code review
+    - Enhancement suggestions
+    - Documentation assessment
+    
+    Args:
+        repo_name: Name of repository (e.g., "user/repo")
+        repo_content: All code files concatenated
+        file_structure: Dictionary of file tree
+        language_stats: Count of files by extension
+        
+    Returns:
+        Formatted prompt string
+    """
+    
+    # Format file structure as text
+    structure_text = _format_file_structure(file_structure)
+    
+    # Format language stats
+    languages = ", ".join([f"{ext}: {count}" for ext, count in language_stats.items()])
+    
+    prompt = f"""# REPOSITORY ANALYSIS TASK
+
+You are analyzing the repository: **{repo_name}**
+
+## REPOSITORY STRUCTURE
+```
+{structure_text}
+```
+
+## LANGUAGE BREAKDOWN
+{languages}
+
+## COMPLETE REPOSITORY CODE
+{repo_content}
+
+---
+
+# YOUR TASK
+
+Provide a **comprehensive analysis** covering ALL of the following sections.
+Return your response as a **valid JSON object** with this exact structure:
+```json
+{{
+  "understanding": {{
+    "description": "Clear 2-3 sentence description of what this project does",
+    "project_type": "Type of project (e.g., 'Web Application', 'CLI Tool', 'Library', 'API')",
+    "tech_stack": ["Primary language/framework", "Database", "Other key technologies"],
+    "key_features": ["Feature 1", "Feature 2", "Feature 3"],
+    "use_cases": ["When to use this", "Who should use this", "What problems it solves"],
+    "complexity": "simple/moderate/complex"
+  }},
+  
+  "code_review": {{
+    "security": [
+      {{
+        "severity": "critical/high/medium/low",
+        "file": "path/to/file.py",
+        "line": 42,
+        "issue": "Brief description of security issue",
+        "fix": "How to fix it",
+        "category": "SQL Injection/XSS/Auth/etc"
+      }}
+    ],
+    "bugs": [
+      {{
+        "severity": "critical/high/medium/low",
+        "file": "path/to/file.py",
+        "line": 15,
+        "issue": "Description of bug",
+        "fix": "How to fix it"
+      }}
+    ],
+    "performance": [
+      {{
+        "severity": "high/medium/low",
+        "file": "path/to/file.py",
+        "line": 78,
+        "issue": "Performance problem",
+        "fix": "Optimization suggestion",
+        "impact": "Expected improvement (e.g., '3x faster')"
+      }}
+    ],
+    "code_quality": [
+      {{
+        "severity": "medium/low",
+        "file": "path/to/file.py",
+        "line": 23,
+        "issue": "Code quality issue",
+        "fix": "How to improve",
+        "category": "Complexity/Duplication/Naming/etc"
+      }}
+    ],
+    "architecture": [
+      {{
+        "issue": "Architectural concern",
+        "recommendation": "How to improve architecture",
+        "impact": "Benefits of change"
+      }}
+    ]
+  }},
+  
+  "enhancements": [
+    {{
+      "priority": "high/medium/low",
+      "title": "Brief enhancement title",
+      "description": "What to add/improve",
+      "impact": "Why this matters",
+      "effort": "low/medium/high"
+    }}
+  ],
+  
+  "documentation": {{
+    "readme_quality": 7,
+    "has_installation_guide": true,
+    "has_usage_examples": false,
+    "has_api_docs": false,
+    "missing": ["What's missing in docs"],
+    "recommendations": ["How to improve documentation"]
+  }},
+  
+  "summary": {{
+    "overall_quality": 7,
+    "strengths": ["Key strength 1", "Key strength 2"],
+    "weaknesses": ["Key weakness 1", "Key weakness 2"],
+    "critical_count": 2,
+    "high_count": 5,
+    "medium_count": 12,
+    "low_count": 8,
+    "production_ready": false,
+    "main_recommendations": ["Top recommendation 1", "Top recommendation 2", "Top recommendation 3"]
+  }}
+}}
+```
+
+---
+
+# GUIDELINES
+
+1. **Be Specific**: Include exact file names and line numbers
+2. **Be Actionable**: Provide clear fixes, not just problems
+3. **Prioritize**: Focus on critical/high severity issues first
+4. **Be Realistic**: Consider the project's scope and purpose
+5. **Be Constructive**: Suggest improvements, not just criticisms
+
+## SEVERITY LEVELS
+- **Critical**: Security vulnerabilities, data loss risks, crashes
+- **High**: Major bugs, significant performance issues, serious security concerns
+- **Medium**: Code quality issues, minor bugs, optimization opportunities
+- **Low**: Style improvements, minor refactoring suggestions
+
+## IMPORTANT
+- Return ONLY the JSON object, no additional text before or after
+- Ensure the JSON is properly formatted and valid
+- If no issues found in a category, use empty array: []
+- Be thorough but focus on the most important findings
+"""
+    
+    return prompt
+
+
+def _format_file_structure(structure: Dict, indent: int = 0) -> str:
+    """
+    Format file structure dictionary as readable tree.
+    
+    Args:
+        structure: Nested dictionary of files/folders
+        indent: Current indentation level
+        
+    Returns:
+        Formatted tree string
+    """
+    lines = []
+    
+    for key, value in structure.items():
+        if isinstance(value, dict):
+            # It's a directory
+            lines.append("  " * indent + f"📁 {key}/")
+            # Recursively format subdirectories
+            lines.append(_format_file_structure(value, indent + 1))
+        else:
+            # It's a file
+            lines.append("  " * indent + f"📄 {key}")
+    
+    return "\n".join(lines)
+
+
+def get_quick_review_prompt(repo_content: str) -> str:
+    """
+    Simplified prompt for quick reviews (optional - for faster analysis).
+    
+    Use this when you want fast results and don't need full analysis.
+    
+    Args:
+        repo_content: Repository code
+        
+    Returns:
+        Quick review prompt
+    """
+    return f"""Review this code and identify ONLY critical and high severity issues:
+
+{repo_content}
+
+Return JSON:
+{{
+  "critical_issues": [{{"file": "...", "line": 10, "issue": "...", "fix": "..."}}],
+  "high_issues": [{{"file": "...", "line": 20, "issue": "...", "fix": "..."}}]
+}}
+
+Focus on: Security vulnerabilities, major bugs, data integrity issues.
+Return ONLY valid JSON."""
+
+==============================
+File : Src\prompts\__init__.py 
+
+content :
+
+from .review_prompts import get_comprehensive_review_prompt , get_quick_review_prompt , get_system_prompt
+
+__all__ = [
+    'get_comprehensive_prompt',
+           'get_quick_review_prompt',
+           'get_system_prompt']
+
+==============================
+File : Src\tests\file_scanner_test.py 
+
+content :
+
+from Src.tools.file_tools import FileScanner
+from Src.tools.github_tools import GitHubTools
+
+# Clone a repo
+github = GitHubTools()
+result = github.clone_repository("https://github.com/Zeyadelgabbas/dialogue-summarization")
+
+if result['success']:
+    # Scan the repo
+    scanner = FileScanner()
+    scan_result = scanner.scan_repository(result['local_path'])
+    
+    print(f"Total files: {scan_result['total_files']}")
+    print(f"Files to review: {len(scan_result['files_to_review'])}")
+    print(f"Languages: {scan_result['language_stats']}")
+    
+    # Read a file
+    if scan_result['files_to_review']:
+        first_file = scan_result['files_to_review'][0]
+        content = scanner.read_file_content(result['local_path'], first_file)
+        print(f"\nFirst file content ({first_file}):")
+        print(content)  # First 200 chars
+    
+    # Cleanup
+    github.cleanup_repository(result['local_path'])
+
+==============================
+File : Src\tests\github_tools_test.py 
+
+content :
+
+from Src.tools.github_tools import GitHubTools
+
+# Create tools instance
+tools = GitHubTools()
+
+# Test cloning
+result = tools.clone_repository("https://github.com/Zeyadelgabbas/dialogue-summarization")
+
+print(f"Success: {result['success']}")
+print(f"Local path: {result['local_path']}")
+print(f"Repo name: {result['repo_name']}")
+
+# Cleanup
+if result['success']:
+    tools.cleanup_repository(result['local_path'])
+    
+
+==============================
+File : Src\tools\file_tools.py 
+
+content :
+
+import os
+from typing import List, Dict, Set , Any
+from pathlib import Path
+from ..utils import get_logger, config
+
+logging = get_logger(__name__)
+
+class FileScanner:
+    """Scans repository for code files to review."""
+    
+    def __init__(self):
+        # Get configuration from config.yaml
+        self.supported_extensions = config.get('review.supported_extensions')
+        self.ignore_patterns = config.get('review.ignore_patterns')
+        self.max_files = config.get('review.max_files')
+        
+        logging.info(f"FileScanner initialized with {len(self.supported_extensions)} supported extensions")
+    
+    def scan_repository(self, repo_path: str) -> Dict[str, any]:
+        """
+        Scan the repo and return info about the files 
+
+        Args: 
+            repo_path : path to the cloned repo locally
+
+        returns:
+            Dictionary contatining : (total_files , files_to_review : list , file_structure : tree structure , language_stats)
+        """
+
+        try:
+            # Getting all supported code files in repo
+            all_files = self._find_code_files(repo_path=repo_path)
+            logging.info(f"Found {len(all_files)} code files in {repo_path}")
+            if len(all_files) > self.max_files:
+                all_files = all_files[:self.max_files]
+
+            # Getting file structure
+            file_structure = self._build_file_structure( files_to_review = all_files)
+
+            # Getting language statistics
+            language_stats = self._get_language_stats(all_files)
+
+            result = {
+                'total_files': len(all_files),
+                "files_to_review" : all_files , 
+                "file_structure" : file_structure,
+                "language_stats" : language_stats
+            }
+            logging.info(f"Scan completed {len(all_files)} files ready for review")
+
+            return result
+
+
+        except Exception as e: 
+            logging.error(f"Error scanning the repo {repo_path} : {e}")
+            raise e
+    
+    def _find_code_files(self, repo_path: str) -> List[str]:
+        """" returns all supported code files found in a local repository """
+        try: 
+            code_files = []
+            for root , dirs , files  in os.walk(repo_path): 
+
+                dirs[:] = [d for d in dirs if not self._should_ignore(d)]
+                
+                for file in files:
+                    file_path = os.path.join(root,file)
+                    if self._is_supported_file(filename=file):
+                        
+                        file_path = os.path.relpath(file_path,repo_path)
+                        code_files.append(file_path)
+
+            return code_files
+
+        except Exception as e: 
+            logging.error(f"Error finding code files : {e} ")
+            raise e
+            
+    def _should_ignore(self, directory: str) -> bool:
+
+        """"
+        Checks if the directory should be ignored
+
+        returns : True if the directory in the ignored pattern
+        """
+       
+        for pattern in self.ignore_patterns:
+            clean_pattern = pattern.strip("*").strip("/")
+
+            if clean_pattern == directory or pattern in directory:
+                return True
+           
+        return False
+    
+       
+    def _is_supported_file(self, filename: str) -> bool:
+       
+        """ Check if the file is a valid supported code file """
+
+        try: 
+
+            ext = os.path.splitext(filename)[1]
+            if ext in self.supported_extensions:
+                return True
+            else:
+                return False
+        except Exception as e: 
+            raise e  
+    
+    def _build_file_structure(self,files_to_review: list) -> Dict[str,Any]:
+
+        """" Build the structure of the repository """
+        structure = {}
+
+        for file in files_to_review:
+
+            current = structure
+            parts = file.split(os.sep)
+
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {}
+
+                current = current[part]
+
+            file_name = parts[-1]
+            current[file_name] = "file"
+
+        return structure
+        
+        
+    def _get_language_stats(self, files: List[str]) -> Dict[str, int]:
+        
+        """ Counts the files by programming language and extension"""
+
+        stats = {}
+
+        for file in files:
+            ext = os.path.splitext(file)[1]
+            stats[ext] = stats.get(ext,0) + 1
+
+        return stats
+    
+    def read_file_content(self, repo_path: str, file_path: str) -> str:
+
+        """" 
+        Reads the content of files safely 
+
+        Returns : 
+            file content as string
+        """
+
+        try:
+            full_path = os.path.join(repo_path,file_path)
+
+            with open(full_path,'r',encoding='utf-8') as f:
+                content = f.read()
+
+            logging.info(f"sucess reading file : {file_path} with {len(content)} characters")
+
+            return content
+
+        except UnicodeDecodeError as e:
+            logging.error(f"Couldnt decode file {file_path} error : {e}")
+            raise e 
+        
+        except Exception as e:
+            logging.error(f"Error reading file content from {file_path} : {e}")
+            raise e
+
+
+==============================
+File : Src\tools\github_tools.py 
+
+content :
+
+import os 
+import shutil 
+import tempfile 
+import requests 
+import time
+
+
+from git import Repo , GitCommandError 
+from typing import Dict , Any
+
+from Src.utils import get_logger , config
+
+
+logging = get_logger(__name__)
+
+class GitHubTools:
+
+    """ Tool to interact with github tools """
+
+    def __init__(self):
+
+        self.temp_dir = tempfile.gettempdir()
+
+    def clone_repository(self, repo_url: str) -> Dict[str,Any]:
+
+        """
+        Clone a github repository to a temp directory 
+
+        returns: 
+            dictionary with : repo_name , local_path , sucess , error 
+        """
+
+        try:
+
+            repo_name = self._get_repo_name(repo_url=repo_url)
+            local_path = os.path.join(
+                self.temp_dir,
+                f"code_review_{repo_name.replace('/','_')}_{os.urandom(4).hex()}"
+            )
+
+            repo = Repo.clone_from(url = repo_url , to_path = local_path ,depth = 1)
+            logging.info(f"Successfully cloned the repo to {local_path}")
+            repo.close()
+
+            return {
+                'repo_name' : repo_name,
+                'local_path' : local_path , 
+                'success' : True,
+                'error' : None
+            }
+
+        except GitCommandError as e : 
+            error = f"Git command error : {e}"
+            logging.error(error)
+            return {
+                'repo_name' : None,
+                'local_path' : None , 
+                'success' : False,
+                'error' : error
+            }
+        
+        except Exception as e: 
+            error = f"error cloning the repository : {e}"
+            logging.error(error)
+            return {
+                'repo_name' : None,
+                'local_path' : None , 
+                'success' : False,
+                'error' : error
+            }
+    def _get_repo_name(self,repo_url : str) -> str:
+
+        """ Extract repo name from repo url """
+
+        url = repo_url.rstrip('/').replace('.git','')
+
+        url_parts = url.split('/')
+
+        return f"{url_parts[-2]}/{url_parts[-1]}"
+    
+
+    def cleanup_repository(self, local_path: str) -> bool:
+        """
+        Delete the cloned repository from disk.
+        Handles Windows permission issues with .git folders.
+        
+        Args:
+            local_path: Path to the cloned repository
+            
+        Returns:
+            True if cleanup successful, False otherwise
+        """
+        try:
+            if os.path.exists(local_path):
+                logging.info(f"Cleaning up repository at: {local_path}")
+                
+                # Windows fix: Remove read-only attributes
+                self._remove_readonly(local_path)
+                
+                # Now delete
+                shutil.rmtree(local_path)
+                logging.info("Cleanup successful")
+                return True
+            return False
+            
+        except Exception as e:
+            logging.error(f"Error cleaning up cloned repo from disk: {str(e)}")
+            return False
+
+    def _remove_readonly(self, path: str):
+        """
+        Remove read-only attribute from files (Windows fix).
+        
+        Args:
+            path: Directory path to process
+        """
+        import stat
+        
+        def handle_remove_readonly(func, path, exc_info):
+            """Error handler for Windows permission issues."""
+            # If permission error, make file writable and retry
+            if not os.access(path, os.W_OK):
+                # Change file permissions to writable
+                os.chmod(path, stat.S_IWUSR | stat.S_IREAD)
+                # Retry the operation
+                func(path)
+            else:
+                raise
+        
+        try:
+            # Walk through all files and remove read-only
+            for root, dirs, files in os.walk(path):
+                for d in dirs:
+                    dir_path = os.path.join(root, d)
+                    os.chmod(dir_path, stat.S_IWUSR | stat.S_IREAD)
+                for f in files:
+                    file_path = os.path.join(root, f)
+                    os.chmod(file_path, stat.S_IWUSR | stat.S_IREAD)
+        except Exception as e:
+            logging.warning(f"Could not remove read-only attributes: {str(e)}")
+
+
+    def check_repo_exists(self,repo_url : str) -> bool:
+
+        """ Check if github repository exists"""
+
+        try: 
+
+            repo_name = self._get_repo_name(repo_url=repo_url)
+            api_url = "https://api.github.com/repos/{repo_name}"
+            headers = {"Authorization": f"token {config.github_token}"}
+
+            response = requests.get(url = api_url,headers=headers )
+
+            if response.status_code ==200:
+                logging.info(f"repo named : {repo_name} exists and acessible")
+                return True
+            
+            elif response.status_code == 401:
+                logging.info(f"repo ({repo_name}) exists but is private")
+                return False
+            else:
+                logging.error(f"repo check failed with status : {response.status_code} ")
+                return False
+
+        except Exception as e: 
+            logging.error(f"repository check failed with status")
+            return False
+        
+
+
+
+
+==============================
+File : Src\tools\LLM_tools.py 
+
+content :
+
+import json
+import tiktoken
+from openai import OpenAI
+from typing import Dict , Optional 
+
+from ..utils import config , get_logger
+
+logging = get_logger(__name__)
+
+
+class LLMTools:
+
+    """"
+    tools for interacting with OPENAI models
+    """
+
+    def __init__(self):
+
+        self.model_name = config.model_name
+        self.temperature = config.temperature
+        self.max_tokens = config.max_tokens
+
+        self.client = OpenAI(api_key=config.openai_api_key)
+
+
+
+    def call_gpt(
+            self,
+            user_prompt: str,
+            system_prompt: str,
+            response_format: str = "text",
+            temperature :  Optional[float] = None ,
+            max_tokens  : Optional[int] = None) -> str:
+    
+
+        """ 
+        calls LLM and get response
+        
+        returns : LLM response as string
+        
+        """
+
+        temperature = self.temperature if not temperature else temperature
+        max_tokens = self.max_tokens if not max_tokens else max_tokens
+
+        try:
+
+            messages = [
+                {'role':'system' , 'content':system_prompt},
+                {'role':'user','content':user_prompt}
+            ]
+
+            response = self.client.chat.completions.create(
+                model = self.model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+
+            response_text = response.choices[0].message.content
+
+            total_tokens = response.usage.total_tokens
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+
+            logging.info("LLM response recevied")
+            logging.info(f"total tokens used : {total_tokens} , prompt tokens : {prompt_tokens} , completion tokens : {completion_tokens}")
+
+            if response_format == 'json':
+                self._validate_json(response_text)
+                
+
+            return response_text
+
+        except json.JSONDecodeError as e:
+            error_msg = f"LLM returned invalid json : {e}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
+    
+
+
+
+    def _validate_json(self,response_text :str) ->None:
+
+        try:
+
+            json.loads(response_text)
+            logging.info("response valid as json")
+
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid json response : {e}")
+            raise e 
+        
+
+    import tiktoken
+
+    def estimate_token_cost(self,text: str, input_price_per_million: float = None, output_price_per_million: float = None, expected_output_tokens: int = None) -> dict:
+        """
+        Estimate token usage and cost for any text, given prices per 1M tokens.
+
+        Args:
+            text (str): Input text or prompt.
+            input_price_per_million (float): Input price in USD per 1 million tokens.
+            output_price_per_million (float): Output price in USD per 1 million tokens.
+            expected_output_tokens (int): Estimated number of tokens in the model's response.
+
+        Returns:
+            dict: Token count and cost estimate.
+        """
+
+        if not expected_output_tokens:
+            expected_output_tokens = self.max_tokens
+
+        if not input_price_per_million:
+            input_price_per_million = config.get("input_price")
+        if not output_price_per_million:
+            output_price_per_million = config.get("output_price")
+
+        encoding = tiktoken.get_encoding("cl100k_base")
+        input_tokens = len(encoding.encode(text))
+
+        input_cost_per_token = input_price_per_million / 1_000_000
+        output_cost_per_token = output_price_per_million / 1_000_000
+
+        # Compute costs
+        input_cost = input_tokens * input_cost_per_token
+        output_cost = expected_output_tokens * output_cost_per_token
+        total_cost = input_cost + output_cost
+
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens_est": expected_output_tokens,
+            "total_tokens_est": input_tokens + expected_output_tokens,
+            "input_cost_usd": round(input_cost, 6),
+            "output_cost_usd": round(output_cost, 6),
+            "total_cost_usd": round(total_cost, 6)
+        }
+
+
+
+
+
+        
+
+==============================
+File : Src\tools\__init__.py 
+
+content :
+
+from .github_tools import GitHubTools
+from .file_tools import FileScanner
+from .LLM_tools import LLMTools
+
+
+__all__ = [
+    'GitHubTools','FileScanner' , 'LLMTools'
+]
+
+==============================
+File : Src\utils\config.py 
+
+content :
+
+import os 
+import yaml 
+
+from dotenv import load_dotenv
+from pathlib import Path
+from typing import Dict , List , Any
+
+from .logger import get_logger
+
+logging = get_logger(__name__)
+load_dotenv()
+
+class Config:
+
+    """ Handles configurations for the project """
+
+
+    def __init__(self,config_path: str = "config.yaml"):
+
+        self.config_path = config_path
+        self._config = self._load_config()
+        self._validate_config()
+ 
+
+    def _load_config(self) -> Dict[str,Any]:
+        
+        try:
+            with open(self.config_path,"r") as f:
+                return yaml.safe_load(f)
+            
+        except Exception as e:
+            logging.error(f"Error loading config.yaml file : {e}")
+            raise e
+        
+    def _validate_config(self):
+        
+        if not os.getenv("OPENAI_API_KEY"):
+            raise ValueError("OPENAI_API_KEY not found in enviroment variables")
+        
+    @property
+    def openai_api_key(self):
+        return os.getenv("OPENAI_API_KEY")
+    
+    @property
+    def github_token(self):
+        return os.getenv("GITHUB_TOKEN")
+    
+    @property
+    def model_name(self):
+        return os.getenv("MODEL_NAME")
+    
+    @property
+    def temperature(self):
+        return os.getenv("TEMPERATURE")
+    
+
+    @property
+    def max_tokens(self):
+        return int(os.getenv("MAX_TOKENS"))
+    
+    def get(self,key: str):
+
+        keys = key.split(".")
+        dic = self._config
+
+        for k in keys:
+
+            if isinstance(dic,dict):
+                dic = dic.get(k)
+
+        return dic 
+
+
+config = Config()     
+
+==============================
+File : Src\utils\logger.py 
+
+content :
+
+import logging 
+import os 
+from datetime import datetime
+
+
+LOG_FILE = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+LOGS_DIR = os.path.join(os.getcwd(), "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+LOG_FILE_PATH = os.path.join(LOGS_DIR, LOG_FILE)
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(lineno)d %(name)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    filename=LOG_FILE_PATH
+)
+
+# Function to create named loggers
+def get_logger(name: str):
+    return logging.getLogger(name)
+
+if __name__ == "__main__":
+    test_logger = get_logger(__name__)
+    test_logger.info("Logger setup complete")
+    
+
+==============================
+File : Src\utils\report_formatter.py 
+
+content :
+
+from typing import Dict, Any, List
+from datetime import datetime
+from ..utils import get_logger
+
+logging = get_logger(__name__)
+
+class ReportFormatter:
+    """
+    Formats code review analysis results into readable markdown reports.
+    
+    Takes structured JSON data and converts it to human-friendly format.
+    """
+    
+    def __init__(self):
+        """Initialize report formatter."""
+        logging.info("ReportFormatter initialized")
+    
+    def generate_report(self, state: Dict[str, Any]) -> str:
+        """
+        Generate comprehensive markdown report from state.
+        
+        This is the main method that creates the complete report.
+        
+        Args:
+            state: Workflow state containing all analysis results
+            
+        Returns:
+            Markdown-formatted report as string
+        """
+        logging.info("Generating comprehensive report...")
+        
+        # Build report sections
+        sections = []
+        
+        # Header
+        sections.append(self._generate_header(state))
+        
+        # Table of Contents
+        sections.append(self._generate_toc())
+        
+        # Executive Summary
+        if state.get("summary"):
+            sections.append(self._generate_executive_summary(state["summary"]))
+        
+        # Project Understanding
+        if state.get("understanding"):
+            sections.append(self._generate_understanding_section(state["understanding"]))
+        
+        # Code Review Findings
+        if state.get("code_review"):
+            sections.append(self._generate_code_review_section(state["code_review"]))
+        
+        # Enhancement Suggestions
+        if state.get("enhancements"):
+            sections.append(self._generate_enhancements_section(state["enhancements"]))
+        
+        # Documentation Assessment
+        if state.get("documentation"):
+            sections.append(self._generate_documentation_section(state["documentation"]))
+        
+        # Footer
+        sections.append(self._generate_footer(state))
+        
+        # Join all sections
+        report = "\n\n---\n\n".join(sections)
+        
+        logging.info("Report generated successfully")
+        return report
+    
+    def _generate_header(self, state: Dict[str, Any]) -> str:
+        """
+        Generate report header with metadata.
+        
+        Args:
+            state: Workflow state
+            
+        Returns:
+            Markdown header
+        """
+        repo_name = state.get("repo_name", "Unknown Repository")
+        repo_url = state.get("repo_url", "")
+        timestamp = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+        
+        header = f"""# 🤖 AI Code Review Report
+
+## Repository: {repo_name}
+
+**URL:** {repo_url}  
+**Analysis Date:** {timestamp}  
+**Files Analyzed:** {state.get('total_files_analyzed', 0)}  
+**Issues Found:** {state.get('total_issues_found', 0)}
+"""
+        return header
+    
+    def _generate_toc(self) -> str:
+        """
+        Generate table of contents.
+        
+        Returns:
+            Markdown table of contents
+        """
+        toc = """## 📋 Table of Contents
+
+1. [Executive Summary](#-executive-summary)
+2. [Project Understanding](#-project-understanding)
+3. [Code Review Findings](#-code-review-findings)
+   - [Security Issues](#security-issues)
+   - [Bugs & Errors](#bugs--errors)
+   - [Performance Issues](#performance-issues)
+   - [Code Quality](#code-quality)
+   - [Architecture](#architecture)
+4. [Enhancement Suggestions](#-enhancement-suggestions)
+5. [Documentation Assessment](#-documentation-assessment)
+"""
+        return toc
+    
+    def _generate_executive_summary(self, summary: Dict[str, Any]) -> str:
+        """
+        Generate executive summary section.
+        
+        Args:
+            summary: Summary data from analysis
+            
+        Returns:
+            Markdown executive summary
+        """
+        overall_quality = summary.get("overall_quality", "N/A")
+        production_ready = "✅ Yes" if summary.get("production_ready", False) else "❌ No"
+        
+        # Severity counts
+        critical = summary.get("critical_count", 0)
+        high = summary.get("high_count", 0)
+        medium = summary.get("medium_count", 0)
+        low = summary.get("low_count", 0)
+        
+        section = f"""## 📊 Executive Summary
+
+### Overall Assessment
+
+**Quality Score:** {overall_quality}/10  
+**Production Ready:** {production_ready}
+
+### Issue Breakdown
+
+| Severity | Count |
+|----------|-------|
+| 🔴 Critical | {critical} |
+| 🟠 High | {high} |
+| 🟡 Medium | {medium} |
+| 🟢 Low | {low} |
+| **Total** | **{critical + high + medium + low}** |
+
+### Key Strengths
+"""
+        
+        # Add strengths
+        strengths = summary.get("strengths", [])
+        if strengths:
+            for strength in strengths:
+                section += f"\n- ✅ {strength}"
+        else:
+            section += "\n- No specific strengths identified"
+        
+        section += "\n\n### Key Weaknesses"
+        
+        # Add weaknesses
+        weaknesses = summary.get("weaknesses", [])
+        if weaknesses:
+            for weakness in weaknesses:
+                section += f"\n- ⚠️ {weakness}"
+        else:
+            section += "\n- No major weaknesses identified"
+        
+        section += "\n\n### Top Recommendations"
+        
+        # Add main recommendations
+        recommendations = summary.get("main_recommendations", [])
+        if recommendations:
+            for i, rec in enumerate(recommendations, 1):
+                section += f"\n{i}. {rec}"
+        else:
+            section += "\n- Continue with current approach"
+        
+        return section
+    
+    def _generate_understanding_section(self, understanding: Dict[str, Any]) -> str:
+        """
+        Generate project understanding section.
+        
+        Args:
+            understanding: Understanding data from analysis
+            
+        Returns:
+            Markdown understanding section
+        """
+        section = f"""## 🎯 Project Understanding
+
+### What This Project Does
+
+{understanding.get('description', 'No description provided')}
+
+### Project Type
+
+**{understanding.get('project_type', 'Unknown')}**
+
+### Tech Stack
+"""
+        
+        # Add tech stack
+        tech_stack = understanding.get("tech_stack", [])
+        if tech_stack:
+            for tech in tech_stack:
+                section += f"\n- {tech}"
+        else:
+            section += "\n- Not specified"
+        
+        section += "\n\n### Key Features"
+        
+        # Add key features
+        features = understanding.get("key_features", [])
+        if features:
+            for feature in features:
+                section += f"\n- ✨ {feature}"
+        else:
+            section += "\n- No key features identified"
+        
+        section += "\n\n### Use Cases"
+        
+        # Add use cases
+        use_cases = understanding.get("use_cases", [])
+        if use_cases:
+            for use_case in use_cases:
+                section += f"\n- 🎯 {use_case}"
+        else:
+            section += "\n- No specific use cases identified"
+        
+        section += f"\n\n### Complexity Level\n\n**{understanding.get('complexity', 'Unknown').capitalize()}**"
+        
+        return section
+    
+    def _generate_code_review_section(self, code_review: Dict[str, Any]) -> str:
+        """
+        Generate code review findings section.
+        
+        Args:
+            code_review: Code review data with all issues
+            
+        Returns:
+            Markdown code review section
+        """
+        section = "## 🔍 Code Review Findings\n"
+        
+        # Security Issues
+        section += "\n### 🔒 Security Issues\n"
+        security_issues = code_review.get("security", [])
+        if security_issues:
+            section += f"\n**Found {len(security_issues)} security issue(s)**\n"
+            section += self._format_issues(security_issues)
+        else:
+            section += "\n✅ No security issues found!\n"
+        
+        # Bugs & Errors
+        section += "\n### 🐛 Bugs & Errors\n"
+        bugs = code_review.get("bugs", [])
+        if bugs:
+            section += f"\n**Found {len(bugs)} bug(s)**\n"
+            section += self._format_issues(bugs)
+        else:
+            section += "\n✅ No bugs found!\n"
+        
+        # Performance Issues
+        section += "\n### ⚡ Performance Issues\n"
+        performance = code_review.get("performance", [])
+        if performance:
+            section += f"\n**Found {len(performance)} performance issue(s)**\n"
+            section += self._format_issues(performance)
+        else:
+            section += "\n✅ No performance issues found!\n"
+        
+        # Code Quality
+        section += "\n### 📝 Code Quality\n"
+        quality = code_review.get("code_quality", [])
+        if quality:
+            section += f"\n**Found {len(quality)} code quality issue(s)**\n"
+            section += self._format_issues(quality)
+        else:
+            section += "\n✅ Code quality looks good!\n"
+        
+        # Architecture
+        section += "\n### 🏛️ Architecture\n"
+        architecture = code_review.get("architecture", [])
+        if architecture:
+            section += f"\n**{len(architecture)} architectural concern(s)**\n"
+            for i, issue in enumerate(architecture, 1):
+                section += f"\n#### {i}. {issue.get('issue', 'Unknown issue')}\n"
+                section += f"\n**Recommendation:** {issue.get('recommendation', 'No recommendation')}\n"
+                section += f"\n**Impact:** {issue.get('impact', 'Unknown impact')}\n"
+        else:
+            section += "\n✅ Architecture looks solid!\n"
+        
+        return section
+    
+    def _format_issues(self, issues: List[Dict[str, Any]]) -> str:
+        """
+        Format a list of issues as markdown.
+        
+        Args:
+            issues: List of issue dictionaries
+            
+        Returns:
+            Formatted markdown string
+        """
+        if not issues:
+            return "\n✅ None found\n"
+        
+        formatted = ""
+        
+        for i, issue in enumerate(issues, 1):
+            severity = issue.get("severity", "unknown")
+            severity_icon = self._get_severity_icon(severity)
+            
+            formatted += f"\n#### {i}. {severity_icon} {issue.get('issue', 'Unknown issue')}\n"
+            formatted += f"\n- **Severity:** {severity.capitalize()}\n"
+            formatted += f"- **File:** `{issue.get('file', 'Unknown')}`\n"
+            
+            if issue.get("line"):
+                formatted += f"- **Line:** {issue.get('line')}\n"
+            
+            if issue.get("category"):
+                formatted += f"- **Category:** {issue.get('category')}\n"
+            
+            formatted += f"\n**Fix:** {issue.get('fix', 'No fix provided')}\n"
+            
+            if issue.get("impact"):
+                formatted += f"\n**Impact:** {issue.get('impact')}\n"
+        
+        return formatted
+    
+    def _get_severity_icon(self, severity: str) -> str:
+        """
+        Get emoji icon for severity level.
+        
+        Args:
+            severity: Severity level string
+            
+        Returns:
+            Emoji icon
+        """
+        severity_lower = severity.lower()
+        
+        icons = {
+            "critical": "🔴",
+            "high": "🟠",
+            "medium": "🟡",
+            "low": "🟢"
+        }
+        
+        return icons.get(severity_lower, "⚪")
+    
+    def _generate_enhancements_section(self, enhancements: List[Dict[str, Any]]) -> str:
+        """
+        Generate enhancement suggestions section.
+        
+        Args:
+            enhancements: List of enhancement suggestions
+            
+        Returns:
+            Markdown enhancements section
+        """
+        section = "## 💡 Enhancement Suggestions\n"
+        
+        if not enhancements:
+            section += "\n✅ No enhancement suggestions at this time.\n"
+            return section
+        
+        # Group by priority
+        high = [e for e in enhancements if e.get("priority") == "high"]
+        medium = [e for e in enhancements if e.get("priority") == "medium"]
+        low = [e for e in enhancements if e.get("priority") == "low"]
+        
+        if high:
+            section += "\n### 🔴 High Priority\n"
+            section += self._format_enhancements(high)
+        
+        if medium:
+            section += "\n### 🟡 Medium Priority\n"
+            section += self._format_enhancements(medium)
+        
+        if low:
+            section += "\n### 🟢 Low Priority\n"
+            section += self._format_enhancements(low)
+        
+        return section
+    
+    def _format_enhancements(self, enhancements: List[Dict[str, Any]]) -> str:
+        """
+        Format enhancement suggestions.
+        
+        Args:
+            enhancements: List of enhancements
+            
+        Returns:
+            Formatted markdown
+        """
+        formatted = ""
+        
+        for i, enhancement in enumerate(enhancements, 1):
+            formatted += f"\n#### {i}. {enhancement.get('title', 'Untitled Enhancement')}\n"
+            formatted += f"\n{enhancement.get('description', 'No description')}\n"
+            formatted += f"\n- **Impact:** {enhancement.get('impact', 'Unknown')}\n"
+            formatted += f"- **Effort:** {enhancement.get('effort', 'Unknown')}\n"
+        
+        return formatted
+    
+    def _generate_documentation_section(self, documentation: Dict[str, Any]) -> str:
+        """
+        Generate documentation assessment section.
+        
+        Args:
+            documentation: Documentation assessment data
+            
+        Returns:
+            Markdown documentation section
+        """
+        section = "## 📚 Documentation Assessment\n"
+        
+        readme_quality = documentation.get("readme_quality", 0)
+        section += f"\n### README Quality: {readme_quality}/10\n"
+        
+        # Status checks
+        section += "\n### Documentation Status\n"
+        section += f"\n- Installation Guide: {'✅' if documentation.get('has_installation_guide') else '❌'}\n"
+        section += f"- Usage Examples: {'✅' if documentation.get('has_usage_examples') else '❌'}\n"
+        section += f"- API Documentation: {'✅' if documentation.get('has_api_docs') else '❌'}\n"
+        
+        # Missing items
+        missing = documentation.get("missing", [])
+        if missing:
+            section += "\n### Missing Documentation\n"
+            for item in missing:
+                section += f"\n- ❌ {item}"
+        
+        # Recommendations
+        recommendations = documentation.get("recommendations", [])
+        if recommendations:
+            section += "\n\n### Recommendations\n"
+            for i, rec in enumerate(recommendations, 1):
+                section += f"\n{i}. {rec}"
+        
+        return section
+    
+    def _generate_footer(self, state: Dict[str, Any]) -> str:
+        """
+        Generate report footer.
+        
+        Args:
+            state: Workflow state
+            
+        Returns:
+            Markdown footer
+        """
+        footer = """## 🤖 About This Report
+
+This report was generated by an AI-powered code review system using:
+- **LangChain** for agent orchestration
+- **LangGraph** for workflow management  
+- **OpenAI GPT-4** for code analysis
+
+**Note:** This is an automated analysis. While comprehensive, it should be reviewed by human developers for final decisions.
+"""
+        
+        # Add timing info if available
+        if state.get("start_time") and state.get("end_time"):
+            footer += f"\n**Analysis Duration:** {self._calculate_duration(state)}"
+        
+        return footer
+    
+    def _calculate_duration(self, state: Dict[str, Any]) -> str:
+        """
+        Calculate analysis duration.
+        
+        Args:
+            state: Workflow state
+            
+        Returns:
+            Duration string
+        """
+        try:
+            start = datetime.fromisoformat(state["start_time"])
+            end = datetime.fromisoformat(state["end_time"])
+            duration = end - start
+            
+            minutes = int(duration.total_seconds() / 60)
+            seconds = int(duration.total_seconds() % 60)
+            
+            return f"{minutes}m {seconds}s"
+        except:
+            return "Unknown"
+    
+    def save_report(self, report: str, output_path: str) -> bool:
+        """
+        Save report to file.
+        
+        Args:
+            report: Report content
+            output_path: File path to save to
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(report)
+            
+            logging.info(f"Report saved to: {output_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to save report: {str(e)}")
+            return False
+
+==============================
+File : Src\utils\__init__.py 
+
+content :
+
+from .logger import get_logger
+from .config import config , Config 
+from .report_formatter import ReportFormatter
+
+__all__ = [
+    'config',
+    'Config',
+    'get_logger',
+    'ReportFormatter'
+]
+
+==============================

@@ -17,7 +17,7 @@ class LLMTools:
     def __init__(self):
 
         self.model_name = config.model_name
-        self.temperature = config.temperature
+        self.temperature = float((config.temperature))
         self.max_tokens = config.max_tokens
 
         self.client = OpenAI(api_key=config.openai_api_key)
@@ -42,6 +42,8 @@ class LLMTools:
 
         temperature = self.temperature if not temperature else temperature
         max_tokens = self.max_tokens if not max_tokens else max_tokens
+        if self.model_name == 'gpt-5':
+            temperature = 1
 
         try:
 
@@ -50,18 +52,26 @@ class LLMTools:
                 {'role':'user','content':user_prompt}
             ]
 
-            response = self.client.chat.completions.create(
+            messages = self._format_messages(messages=messages)
+            response = self.client.responses.create(
                 model = self.model_name,
-                messages=messages,
+                input=messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_output_tokens = max_tokens
             )
 
-            response_text = response.choices[0].message.content
+            response_text = response.output_text
+            print(response_text)
+            x=response.model_dump_json(indent=2)
+            logging.info(f"output new : \n\n {x}")
+
+            print(response.model_dump_json(indent=2))
+
+            logging.info(f"response text : {response_text}")
 
             total_tokens = response.usage.total_tokens
-            prompt_tokens = response.usage.prompt_tokens
-            completion_tokens = response.usage.completion_tokens
+            prompt_tokens = response.usage.input_tokens
+            completion_tokens = response.usage.output_tokens
 
             logging.info("LLM response recevied")
             logging.info(f"total tokens used : {total_tokens} , prompt tokens : {prompt_tokens} , completion tokens : {completion_tokens}")
@@ -76,6 +86,11 @@ class LLMTools:
             error_msg = f"LLM returned invalid json : {e}"
             logging.error(error_msg)
             raise ValueError(error_msg)
+        
+        except Exception as e:
+            error_msg=f"Error calling gpt : {e}"
+            logging.error(error_msg)
+            raise e
     
 
 
@@ -83,7 +98,7 @@ class LLMTools:
     def _validate_json(self,response_text :str) ->None:
 
         try:
-
+            logging.info(f" the respone is \n\n {response_text}")
             json.loads(response_text)
             logging.info("response valid as json")
 
@@ -91,8 +106,6 @@ class LLMTools:
             logging.error(f"Invalid json response : {e}")
             raise e 
         
-
-    import tiktoken
 
     def estimate_token_cost(self,text: str, input_price_per_million: float = None, output_price_per_million: float = None, expected_output_tokens: int = None) -> dict:
         """
@@ -112,13 +125,13 @@ class LLMTools:
             expected_output_tokens = self.max_tokens
 
         if not input_price_per_million:
-            input_price_per_million = config.get("input_price")
+            input_price_per_million = config.get("agent.input_price")
         if not output_price_per_million:
-            output_price_per_million = config.get("output_price")
+            output_price_per_million = config.get("agent.output_price")
 
         encoding = tiktoken.get_encoding("cl100k_base")
         input_tokens = len(encoding.encode(text))
-
+        logging.info(f"total tokens :  {(input_tokens)} tokens")
         input_cost_per_token = input_price_per_million / 1_000_000
         output_cost_per_token = output_price_per_million / 1_000_000
 
@@ -126,7 +139,7 @@ class LLMTools:
         input_cost = input_tokens * input_cost_per_token
         output_cost = expected_output_tokens * output_cost_per_token
         total_cost = input_cost + output_cost
-
+        
         return {
             "input_tokens": input_tokens,
             "output_tokens_est": expected_output_tokens,
@@ -139,5 +152,14 @@ class LLMTools:
 
 
 
+    def _format_messages(self,messages):
+        """Convert old-style messages into new API-compatible format."""
 
+        formatted = []
+        for msg in messages:
+            formatted.append({
+                "role": msg["role"],
+                "content": [{"type": "input_text", "text": msg["content"]}]
+            })
+        return formatted
         

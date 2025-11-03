@@ -179,7 +179,7 @@ class CodeReviewer:
                 file_structure=file_structure,
                 language_stats=language_stats
             )
-            total_cost = self.llm.estimate_token_cost(text=user_prompt)['total_cost']
+            total_cost = self.llm.estimate_token_cost(text=user_prompt)['total_cost_usd']
 
             return total_cost
         

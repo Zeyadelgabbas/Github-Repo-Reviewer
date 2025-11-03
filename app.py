@@ -189,7 +189,7 @@ def main():
     
     # Header
     st.title("🤖 AI Code Review Agent")
-    st.markdown("Powered by LangChain, LangGraph & OpenAI GPT-4")
+    st.markdown("Powered by LangChain, LangGraph & OpenAI GPT-5")
     
     # Sidebar (same as before)
     with st.sidebar:
